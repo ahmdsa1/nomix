@@ -11,6 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import io
+import os
 import numpy as np
 from sklearn.linear_model import LinearRegression
 
@@ -333,15 +334,22 @@ def kpi_row(cards, cols=5):
     return (f'<div class="kpi-grid" style="grid-template-columns:repeat({cols},1fr)">'
             + "".join(cards) + "</div>")
 
+
+
 # ============================================================
-# DATABASE CONNECTION
+# DATABASE — fresh connection per query (thread-safe for cloud)
 # ============================================================
 
-@st.cache_resource
-def get_connection():
-    return sqlite3.connect("trust_labs.db", check_same_thread=False)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trust_labs.db")
 
-conn = get_connection()
+def _query(sql):
+    """Open a fresh connection, run query, close. Safe on Streamlit Cloud."""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql(sql, con)
+    finally:
+        con.close()
+    return df
 
 # ============================================================
 # DATA LOADERS
@@ -349,62 +357,61 @@ conn = get_connection()
 
 @st.cache_data(ttl=3600)
 def load_patients():
-    return pd.read_sql("SELECT * FROM patients", conn)
+    return _query("SELECT * FROM patients")
 
 @st.cache_data(ttl=3600)
 def load_visits():
-    df = pd.read_sql("SELECT * FROM visits", conn)
+    df = _query("SELECT * FROM visits")
     df["visit_date"]  = pd.to_datetime(df["visit_date"],  errors="coerce")
     df["visit_month"] = pd.to_datetime(df["visit_month"], errors="coerce")
     return df
 
 @st.cache_data(ttl=3600)
 def load_doctors():
-    return pd.read_sql("SELECT * FROM doctors", conn)
+    return _query("SELECT * FROM doctors")
 
 @st.cache_data(ttl=3600)
 def load_corporates():
-    return pd.read_sql("SELECT * FROM corporates", conn)
+    return _query("SELECT * FROM corporates")
 
 @st.cache_data(ttl=3600)
 def load_branches():
-    return pd.read_sql("SELECT * FROM branches", conn)
+    return _query("SELECT * FROM branches")
 
 @st.cache_data(ttl=3600)
 def load_monthly_trends():
-    df = pd.read_sql("SELECT * FROM monthly_trends", conn)
+    df = _query("SELECT * FROM monthly_trends")
     df["visit_month"] = pd.to_datetime(df["visit_month"], errors="coerce")
     return df
 
 @st.cache_data(ttl=3600)
 def load_monthly_revenue():
-    df = pd.read_sql("SELECT * FROM monthly_revenue", conn)
+    df = _query("SELECT * FROM monthly_revenue")
     df["visit_month"] = pd.to_datetime(df["visit_month"], errors="coerce")
     return df
 
 @st.cache_data(ttl=3600)
 def load_revenue_by_test():
-    return pd.read_sql(
-        "SELECT * FROM revenue_by_test ORDER BY total_revenue DESC LIMIT 20", conn)
+    return _query("SELECT * FROM revenue_by_test ORDER BY total_revenue DESC LIMIT 20")
 
 @st.cache_data(ttl=3600)
 def load_hourly_patterns():
     try:
-        return pd.read_sql("SELECT * FROM hourly_patterns", conn)
+        return _query("SELECT * FROM hourly_patterns")
     except Exception:
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_dow_patterns():
     try:
-        return pd.read_sql("SELECT * FROM dow_patterns", conn)
+        return _query("SELECT * FROM dow_patterns")
     except Exception:
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_daily_stats():
     try:
-        df = pd.read_sql("SELECT * FROM daily_stats", conn)
+        df = _query("SELECT * FROM daily_stats")
         df["visit_date"] = pd.to_datetime(df["visit_date"], errors="coerce")
         return df
     except Exception:
@@ -413,14 +420,14 @@ def load_daily_stats():
 @st.cache_data(ttl=3600)
 def load_branch_comparison():
     try:
-        return pd.read_sql("SELECT * FROM branch_comparison", conn)
+        return _query("SELECT * FROM branch_comparison")
     except Exception:
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def load_doctor_branch():
     try:
-        return pd.read_sql("SELECT * FROM doctor_branch", conn)
+        return _query("SELECT * FROM doctor_branch")
     except Exception:
         return pd.DataFrame()
 
@@ -429,25 +436,25 @@ def load_doctor_branch():
 # ============================================================
 
 def search_patient_by_id(pid):
-    q = f"SELECT * FROM patients WHERE LOWER(patient_id)=LOWER('{pid}')"
-    r = pd.read_sql(q, conn)
+    pid = pid.replace("'", "''")   # basic SQL injection guard
+    r = _query(f"SELECT * FROM patients WHERE LOWER(patient_id)=LOWER('{pid}')")
     return r if not r.empty else None
 
 def search_doctor_by_id(did):
-    q = f"SELECT * FROM doctors WHERE LOWER(doctor_id)=LOWER('{did}')"
-    r = pd.read_sql(q, conn)
+    did = did.replace("'", "''")
+    r = _query(f"SELECT * FROM doctors WHERE LOWER(doctor_id)=LOWER('{did}')")
     return r if not r.empty else None
 
 def search_corporate_by_id(cid):
-    q = f"SELECT * FROM corporates WHERE LOWER(corporate_id)=LOWER('{cid}')"
-    r = pd.read_sql(q, conn)
+    cid = cid.replace("'", "''")
+    r = _query(f"SELECT * FROM corporates WHERE LOWER(corporate_id)=LOWER('{cid}')")
     return r if not r.empty else None
 
 def get_patient_visits(pid):
-    q = f"""SELECT visit_date, branch_name, visit_time, visit_day_name
-            FROM visits WHERE LOWER(patient_id)=LOWER('{pid}')
-            ORDER BY visit_date DESC"""
-    df = pd.read_sql(q, conn)
+    pid = pid.replace("'", "''")
+    df = _query(f"""SELECT visit_date, branch_name, visit_time, visit_day_name
+                    FROM visits WHERE LOWER(patient_id)=LOWER('{pid}')
+                    ORDER BY visit_date DESC""")
     df["visit_date"] = pd.to_datetime(df["visit_date"], errors="coerce")
     return df
 
@@ -459,6 +466,7 @@ def export_to_excel(df):
     out = io.BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as w:
         df.to_excel(w, index=False)
+    return out.getvalue()
     return out.getvalue()
 
 def export_to_csv(df):
@@ -1723,7 +1731,7 @@ elif page == "📥  Export":
     if selected == "High Risk Patients":
         export_data = patients_data[patients_data["churn_risk_category"] == "High Risk"]
     else:
-        export_data = pd.read_sql(f"SELECT * FROM {table_options[selected]}", conn)
+        export_data = _query(f"SELECT * FROM {table_options[selected]}")
 
     info_card_start(f"Preview: {selected}")
     st.markdown(f'<p style="color:#5f6368;font-size:.85rem">Total records: {len(export_data):,}</p>',
